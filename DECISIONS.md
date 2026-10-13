@@ -1,0 +1,17 @@
+cd "C:\Users\KALYANASUNDARAM N\Downloads\VIKMO_DealerDesk_Assignment (1)\VIKMO DealerDesk Assignment"# Django Track Decisions
+
+1. **Overselling and stock reservation.** `starter/core/services.py:81` locks the order row inside `transaction.atomic`; `starter/core/services.py:76` locks its products in stable SKU order. Confirmation checks every line before decrementing any stock (`starter/core/services.py:112`) and commits stock/status together. A database check constraint also prevents negative product stock (`starter/core/models.py:17`).
+
+2. **GST and monetary arithmetic.** `starter/core/serializers.py:129` calculates line subtotals and tax using `Decimal`; tax is rounded per line with `ROUND_HALF_UP`. Totals are sums of the rounded line values. Floats can introduce binary representation error; Decimal's default rounding mode is not the contract's explicit half-up rule.
+
+3. **Order numbers and idempotency.** `starter/core/services.py:18` obtains the date-specific sequence row and locks it before incrementing. The date is unique in `DailyOrderNumberSequence` (`starter/core/models.py:89`). `starter/core/services.py:30` uses the database-unique idempotency key and request hash (`starter/core/models.py:79`) within the order transaction. Concurrent tests cover two same-key requests and two distinct requests, but are not a high-volume stress test.
+
+4. **Schema and relationships.** `Product` stores catalogue fields and available stock (`starter/core/models.py:5`). `Dealer` uses a unique dealer code (`starter/core/models.py:25`). `Order` stores dealer, status, totals, and timestamps (`starter/core/models.py:38`); its dealer FK uses `PROTECT` to preserve order history. `OrderItem` stores item snapshots and points to `Order` with `CASCADE` and `Product` with `PROTECT` (`starter/core/models.py:62`). `IdempotencyRecord` points to its order with `PROTECT` so request keys cannot outlive their response record (`starter/core/models.py:79`). `DailyOrderNumberSequence` stores one counter per date (`starter/core/models.py:89`).
+
+5. **Status transitions and exactly-once restoration.** `starter/core/services.py:81` enforces the action/status table under an order lock. Confirmed cancellation restores item quantities before setting CANCELLED in the same transaction (`starter/core/services.py:97`). A later cancellation sees a final state and returns `INVALID_TRANSITION`, so it cannot restore stock twice.
+
+6. **Supplier pagination and failure behavior.** `starter/core/supplier_sync.py:58` calls `/v1/products` with the API key, cursor, bounded page size, timeout, and retries. `starter/core/supplier_sync.py:184` fetches all pages before writes; repeated cursors and malformed envelopes fail the sync. Exhausted fetch failures become `502 SUPPLIER_UNAVAILABLE`. Individual invalid items are reported and skipped per contract.
+
+7. **Supplier apply and repeat behavior.** `starter/core/supplier_sync.py:212` chooses the latest valid `updated_at` for each SKU. `starter/core/supplier_sync.py:229` updates only contract-approved fields and creates missing products at stock zero; it never updates existing stock. Applying the feed transactionally makes an unchanged second run report products as unchanged.
+
+8. **Weakest part.** The optional assistant, forecasting, and frontend are not implemented. Supplier behavior has deterministic unit tests and a local mock integration check, but not production-scale load testing or external-provider verification.
